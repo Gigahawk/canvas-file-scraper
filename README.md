@@ -14,3 +14,7 @@ python canvas-scraper.py <CANVAS_API_KEY>
 ```
 
 For info on how to get an API key please refer to the [Canvas Dev course](https://canvas.instructure.com/courses/785215/pages/getting-started-with-the-api)
+
+## Todo
+ - Add async option
+ - Add support for non-file items (quizzes, assignments, links, etc)
