@@ -2,7 +2,7 @@ import argparse
 import requests
 import pprint
 import os
-import re
+import urllib
 
 parser = argparse.ArgumentParser(
         description='Grabs all files for all courses on Canvas')
@@ -55,7 +55,12 @@ for course in courses:
                 url_file_info = item['url']
                 response = requests.get(url_file_info, params=None, headers=HEADERS)
                 file_info = response.json()
-                file_name = file_info['filename']
+
+                # Could use unquote_plus, but files downloaded from
+                # the site leave the plusses in
+                # file_name = urllib.parse.unquote_plus(file_info['filename'])
+                file_name = urllib.parse.unquote(file_info['filename'])
+
                 url_file = file_info['url']
                 file_path = os.path.join(module_path, file_name)
 
@@ -72,8 +77,6 @@ for course in courses:
 
                 print(f"Downloading {item['title']}")
                 response = requests.get(url_file, params=None, headers=HEADERS)
-                #file_name = re.findall('filename=(.+)', response.headers['content-disposition'])[0]
-
 
                 open(file_path, 'wb').write(response.content)
 
