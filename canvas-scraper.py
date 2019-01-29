@@ -8,7 +8,8 @@ import re
 INVALID_CHARS = "[<>:/\\|?*\"]|[\0-\31]"
 
 def __removeInvalidChars(name):
-    return re.sub(INVALID_CHARS, " ", name)
+    name = name.strip()
+    return re.sub(INVALID_CHARS, "-", name)
 
 parser = argparse.ArgumentParser(
         description='Grabs all files for all courses on Canvas')
@@ -24,7 +25,7 @@ parser.add_argument('-d', '--directory', type=str,
 args = parser.parse_args()
 
 if not args.canvas_url:
-    args.canvas_url = 'canvas.ubs.ca'
+    args.canvas_url = 'canvas.ubc.ca'
 
 if not args.overwrite or args.overwrite in ['yes', 'no', 'ask']:
     args.overwrite = 'no'
@@ -65,7 +66,7 @@ for course in courses:
                 # Could use unquote_plus, but files downloaded from
                 # the site leave the plusses in
                 # file_name = urllib.parse.unquote_plus(file_info['filename'])
-                file_name = urllib.parse.unquote(file_info['filename'])
+                file_name = __removeInvalidChars(urllib.parse.unquote(file_info['filename']))
 
                 url_file = file_info['url']
                 file_path = os.path.join(module_path, file_name)
