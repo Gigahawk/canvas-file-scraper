@@ -3,6 +3,12 @@ import requests
 import pprint
 import os
 import urllib
+import re
+
+INVALID_CHARS = "[<>:/\\|?*\"]|[\0-\31]"
+
+def __removeInvalidChars(name):
+    return re.sub(INVALID_CHARS, " ", name)
 
 parser = argparse.ArgumentParser(
         description='Grabs all files for all courses on Canvas')
@@ -18,7 +24,7 @@ parser.add_argument('-d', '--directory', type=str,
 args = parser.parse_args()
 
 if not args.canvas_url:
-    args.canvas_url = 'canvas.ubc.ca'
+    args.canvas_url = 'canvas.ubs.ca'
 
 if not args.overwrite or args.overwrite in ['yes', 'no', 'ask']:
     args.overwrite = 'no'
@@ -36,14 +42,14 @@ response = requests.get(url_courses, params=None, headers=HEADERS)
 courses = response.json()
 
 for course in courses:
-    course_name = course['name']
+    course_name = __removeInvalidChars(course['name'])
     course_id = course['id']
     print(f'COURSE: {course_name}')
     url_modules = f'{url_courses}/{course_id}/modules'
     response = requests.get(url_modules, params=None, headers=HEADERS)
     modules = response.json()
     for module in modules:
-        module_name = module['name']
+        module_name = __removeInvalidChars(module['name'])
         module_path = os.path.join('.', args.directory, course_name, module_name)
         url_items = module['items_url']
         print(f'MODULE: {module_name}')
