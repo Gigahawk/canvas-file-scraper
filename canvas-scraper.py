@@ -2,14 +2,14 @@ import argparse
 import requests
 import pprint
 import os
-import urllib
 import re
+import urllib
 
 INVALID_CHARS = "[<>:/\\|?*\"]|[\0-\31]"
 
 def __removeInvalidChars(name):
     name = name.strip()
-    return re.sub(INVALID_CHARS, "-", name)
+    return re.sub(INVALID_CHARS, " ", name)
 
 parser = argparse.ArgumentParser(
         description='Grabs all files for all courses on Canvas')
@@ -86,5 +86,23 @@ for course in courses:
                 response = requests.get(url_file, params=None, headers=HEADERS)
 
                 open(file_path, 'wb').write(response.content)
+            elif item['type'] == 'ExternalUrl':
+                file_name = __removeInvalidChars(item['title'] + '.url')
+
+                file_path = os.path.join(module_path, file_name)
+
+                if os.path.isfile(file_path) and args.overwrite is not 'yes':
+                    if args.overwrite is 'no':
+                        print(f'Link {file_name} exists')
+                        print('Skipping')
+                        continue
+                    else:
+                        overwrite = input(f'Link {file_name} exists: overwrite? (y/n): ') == 'y'
+                        if not overwrite:
+                            print('Skipping')
+                            continue
+                print(f"Adding link {item['title']}")
+                url = item['external_url']
+                open(file_path, 'w').write('[InternetShortcut]\nURL=%s' % url)
 
 
