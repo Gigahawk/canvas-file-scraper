@@ -32,25 +32,52 @@ URL_BASE = f'https://{args.canvas_url}/api/v1'
 
 url_courses = f'{URL_BASE}/courses'
 
-response = requests.get(url_courses, params=None, headers=HEADERS)
-courses = response.json()
+courses = []
+page = 1
+while True:
+    print(f'Grabbing page {page} of courses')
+    response = requests.get(f'{url_courses}?page={page}', params=None, headers=HEADERS)
+    if len(response.json()) == 0:
+        print(f'Page empty, continuing')
+        break
+    courses.extend(response.json())
+    page += 1
 
 for course in courses:
     course_name = course['name']
     course_id = course['id']
     print(f'COURSE: {course_name}')
     url_modules = f'{url_courses}/{course_id}/modules'
-    response = requests.get(url_modules, params=None, headers=HEADERS)
-    modules = response.json()
+    modules = []
+    page = 1
+    while True:
+        print(f'Grabbing page {page} of modules')
+        response = requests.get(f'{url_modules}?page={page}', params=None, headers=HEADERS)
+        if len(response.json()) == 0:
+            print(f'Page empty, continuing')
+            break
+        modules.extend(response.json())
+        page += 1
     for module in modules:
         module_name = module['name']
         module_path = os.path.join('.', args.directory, course_name, module_name)
-        url_items = module['items_url']
         print(f'MODULE: {module_name}')
-        response = requests.get(url_items, params=None, headers=HEADERS)
-        items = response.json()
+        url_items =module["items_url"]
+
+        module_size = int(module['items_count'])
+        items = []
+        page = 1
+        while True:
+            print(f'Grabbing page {page} of items')
+            response = requests.get(f'{url_items}?page={page}', params=None, headers=HEADERS)
+            if len(response.json()) == 0:
+                print(f'Page empty, continuing')
+                break
+            items.extend(response.json())
+            page += 1
         os.makedirs(module_path, exist_ok=True)
         for item in items:
+            print(f"ITEM: {item['title']}")
             if item['type'] == 'File':
                 url_file_info = item['url']
                 response = requests.get(url_file_info, params=None, headers=HEADERS)
