@@ -1,8 +1,13 @@
 import argparse
 import requests
-import pprint
 import os
 import urllib
+import pprint
+import json
+from markdownify import markdownify as md
+from bs4 import BeautifulSoup
+import re
+pp = pprint.PrettyPrinter(indent=4)
 
 parser = argparse.ArgumentParser(
         description='Grabs all files for all courses on Canvas')
@@ -46,7 +51,19 @@ while True:
 for course in courses:
     course_name = course['name']
     course_id = course['id']
+    course_path = os.path.join('.', args.directory, course_name)
     print(f'COURSE: {course_name}')
+    url_front_page = f'{url_courses}/{course_id}/front_page'
+    print(f'Grabbing front page for {course_name}')
+    response = requests.get(url_front_page, params=None, headers=HEADERS)
+    front_page = response.json()
+
+    os.makedirs(course_path, exist_ok=True)
+    course_front_page_name = os.path.join(course_path, 'front_page.html')
+
+    with open(course_front_page_name, 'w') as f:
+        f.writelines(front_page['body'])
+
     url_modules = f'{url_courses}/{course_id}/modules'
     modules = []
     page = 1
@@ -60,7 +77,7 @@ for course in courses:
         page += 1
     for module in modules:
         module_name = module['name']
-        module_path = os.path.join('.', args.directory, course_name, module_name)
+        module_path = os.path.join(course_path, module_name)
         print(f'MODULE: {module_name}')
         url_items =module["items_url"]
 
@@ -77,7 +94,7 @@ for course in courses:
             page += 1
         os.makedirs(module_path, exist_ok=True)
         for item in items:
-            print(f"ITEM: {item['title']}")
+            print(f"ITEM: {item['title']}, TYPE: {item['type']}")
             if item['type'] == 'File':
                 url_file_info = item['url']
                 response = requests.get(url_file_info, params=None, headers=HEADERS)
@@ -104,7 +121,56 @@ for course in courses:
 
                 print(f"Downloading {item['title']}")
                 response = requests.get(url_file, params=None, headers=HEADERS)
+                with open(file_path, 'wb') as f:
+                    f.write(response.content)
+            elif item['type'] == 'Page':
+                url_page_info = item['url']
+                print("Downloading page content")
+                response = requests.get(url_page_info, params=None, headers=HEADERS)
+                page_info = response.json()
 
-                open(file_path, 'wb').write(response.content)
+                page_path = os.path.join(module_path, item['title'])
+                os.makedirs(page_path, exist_ok=True)
+
+                body_path = os.path.join(page_path, 'body.html')
+                body_md_path = os.path.join(page_path, 'body.md')
+                with open(body_path, 'w') as f:
+                    f.writelines(page_info['body'])
+
+                print("Converting to markdown")
+                with open(body_md_path, 'w') as f:
+                    f.writelines(md(page_info['body']))
+
+                soup = BeautifulSoup(page_info['body'], 'html.parser')
+                links = soup.find_all('a', **{'data-api-returntype': 'File'})
+
+                if len(links) > 0:
+                    print("Downloading page files")
+                    page_file_dir_path = os.path.join(page_path, 'files')
+                    os.makedirs(page_file_dir_path, exist_ok=True)
+                    for link in links:
+                        file_name = link['title']
+                        print(f"Downloading {file_name}")
+                        response = requests.get(link['href'], params=None, headers=HEADERS)
+                        page_file_path = os.path.join(page_file_dir_path, file_name)
+                        with open(page_file_path, 'wb') as f:
+                            f.write(response.content)
+            elif item['type'] == 'Assignment':
+                url_assignment_info = item['url']
+                print("Downloading assignment content")
+                response = requests.get(url_assignment_info, params=None, headers=HEADERS)
+                assignment_info = response.json()
+
+                assignment_path = os.path.join(module_path, item['title'])
+                os.makedirs(assignment_path, exist_ok=True)
+
+                assignment_file_name = os.path.join(assignment_path, 'assignment.json')
+                assignment_description_name = os.path.join(assignment_path, 'description.html')
+
+                with open(assignment_file_name, 'w') as f:
+                    f.writelines(json.dumps(assignment_info, indent=4))
+
+                with open(assignment_description_name, 'w') as f:
+                    f.writelines(assignment_info['description'])
 
 
