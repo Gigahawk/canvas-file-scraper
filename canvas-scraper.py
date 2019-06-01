@@ -59,10 +59,13 @@ for course in courses:
     front_page = response.json()
 
     os.makedirs(course_path, exist_ok=True)
-    course_front_page_name = os.path.join(course_path, 'front_page.html')
 
-    with open(course_front_page_name, 'w') as f:
-        f.writelines(front_page['body'])
+    # Only write front page if it actually exists
+    if 'body' in front_page:
+        course_front_page_name = os.path.join(course_path, 'front_page.html')
+
+        with open(course_front_page_name, 'w') as f:
+            f.writelines(front_page['body'])
 
     url_modules = f'{url_courses}/{course_id}/modules'
     modules = []
@@ -166,6 +169,7 @@ for course in courses:
 
                 assignment_file_name = os.path.join(assignment_path, 'assignment.json')
                 assignment_description_name = os.path.join(assignment_path, 'description.html')
+                assignment_description_md_name = os.path.join(assignment_path, 'description.md')
 
                 with open(assignment_file_name, 'w') as f:
                     f.writelines(json.dumps(assignment_info, indent=4))
@@ -173,4 +177,22 @@ for course in courses:
                 with open(assignment_description_name, 'w') as f:
                     f.writelines(assignment_info['description'])
 
+                print("Converting to markdown")
+                with open(assignment_description_md_name, 'w') as f:
+                    f.writelines(md(assignment_info['description']))
+
+                soup = BeautifulSoup(assignment_info['description'], 'html.parser')
+                links = soup.find_all('a', **{'data-api-returntype': 'File'})
+
+                if len(links) > 0:
+                    print("Downloading assignment files")
+                    assignment_file_dir_path = os.path.join(assignment_path, 'files')
+                    os.makedirs(assignment_file_dir_path, exist_ok=True)
+                    for link in links:
+                        file_name = link['title']
+                        print(f"Downloading {file_name}")
+                        response = requests.get(link['href'], params=None, headers=HEADERS)
+                        assignment_file_path = os.path.join(assignment_file_dir_path, file_name)
+                        with open(assignment_file_path, 'wb') as f:
+                            f.write(response.content)
 
