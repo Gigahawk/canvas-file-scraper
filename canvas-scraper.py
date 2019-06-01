@@ -49,7 +49,10 @@ while True:
     page += 1
 
 for course in courses:
-    course_name = course['name']
+    try:
+        course_name = course['name']
+    except KeyError:
+        continue
     course_id = course['id']
     course_path = os.path.join('.', args.directory, course_name)
     print(f'COURSE: {course_name}')
