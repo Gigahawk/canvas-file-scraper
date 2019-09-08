@@ -86,7 +86,7 @@ class CanvasScraper:
 
         if self.markdown and self._dl_page(page_url, page_path):
             self._markdownify(page_path, page_md_path)
-        self._dl_page_data(page_path)
+            self._dl_page_data(page_path)
 
     def handle_assignment(self, item):
         pass
