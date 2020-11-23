@@ -4,11 +4,14 @@ verify_ssl = true
 name = "pypi"
 
 [dev-packages]
+pylint = "*"
+jedi = "*"
 
 [packages]
 requests = "*"
 markdownify = "*"
 "bs4" = "*"
+canvasapi = "*"
 
 [requires]
-python_version = "3.6"
+python_version = "3.8"

@@ -1,11 +1,33 @@
 import os
 import requests
+from requests.exceptions import MissingSchema
 import logging
 import json
 from tempfile import TemporaryFile
 import urllib
 from bs4 import BeautifulSoup
 from markdownify import markdownify as md
+from canvasapi import Canvas
+from canvasapi.exceptions import Unauthorized, ResourceDoesNotExist
+
+from canvasapi.canvas_object import CanvasObject
+from canvasapi.paginated_list import PaginatedList
+from canvasapi.util import combine_kwargs
+
+
+class MediaObject(CanvasObject):
+    pass
+
+
+def get_media_objects(self, *args, **kwargs):
+    return PaginatedList(
+        MediaObject,
+        self._requester,
+        "GET",
+        "courses/{}/media_objects".format(self.id),
+        {"course_id": self.id},
+        _kwargs=combine_kwargs(**kwargs),
+    )
 
 
 class CanvasScraper:
@@ -20,6 +42,8 @@ class CanvasScraper:
         self.videos = videos
         self.markdown = markdown
         self._logger = logger
+        self._canvas = Canvas(self.base_url, self.api_key)
+        self.user = self._canvas.get_current_user()
 
         if not self._logger:
             self._logger = logging
@@ -29,7 +53,7 @@ class CanvasScraper:
         self._ids = []
 
     def scrape(self):
-        courses = self.get_all_objects(self._courses_url())
+        courses = self.user.get_courses()
         for c in courses:
             self.recurse_course(c)
 
@@ -38,67 +62,213 @@ class CanvasScraper:
             self.push(course, "course")
         except KeyError:
             return
-        fp_url = self._course_frontpage_url(self.id)
-        fp_path = os.path.join(self.path, "front_page.html")
-        fp_md_path = os.path.join(self.path, "front_page.md")
-        if self.markdown and self._dl_page(fp_url, fp_path):
-            self._markdownify(fp_path, fp_md_path)
 
-        modules = self.get_all_objects(self._modules_url(self.id))
-        for m in modules:
-            self.recurse_module(m)
+        try:
+            fp_path = os.path.join(self.path, "front_page.html")
+            fp_md_path = os.path.join(self.path, "front_page.md")
+            fp = course.show_front_page().body
+
+            if self.markdown and self._dl_page(fp, fp_path):
+                self._markdownify(fp_path, fp_md_path)
+        except (Unauthorized, ResourceDoesNotExist) as e:
+            self.logger.warning(e)
+            self.logger.warning(f"Front page not accesible")
+
+        try:
+            modules = course.get_modules()
+            for m in modules:
+                self.recurse_module(m)
+        except (Unauthorized, ResourceDoesNotExist) as e:
+            self.logger.warning(e)
+            self.logger.warning(f"Modules not accesible")
+
+        try:
+            groups = course.get_groups()
+            for g in groups:
+                self.recurse_group(g)
+        except (Unauthorized, ResourceDoesNotExist) as e:
+            self.logger.warning(e)
+            self.logger.warning(f"Groups not accesible")
+        self.scrape_files(course)
+
+        self.scrape_media(course)
+
+
+        self.pop()
+
+    def recurse_group(self, group):
+        try:
+            self.push(group, "group")
+        except KeyError:
+            return
+        json_path = os.path.join(self.path, "group.json")
+        self._dl_obj(group, json_path)
+        self.scrape_files(group)
+        self.pop()
+
+    def scrape_files(self, obj):
+        # Hack to put files under a separate subfolder from modules
+        self.push_raw(f"files_{obj.id}", "files", 0)
+        try:
+            # get_folders() returns a flat list of all folders
+            folders = obj.get_folders()
+            for f in folders:
+                self.recurse_folder(f)
+        except Unauthorized:
+            self.logger.warning(f"Files not accesible")
+        self.pop()
+
+    def scrape_media(self, obj):
+        # Hack to put media under a separate subfolder from modules
+        self.push_raw(f"media_{obj.id}", "media", 0)
+        try:
+            obj.__class__.get_media_objects = get_media_objects
+            media_objs = obj.get_media_objects()
+            for m in media_objs:
+                if "video" in m.media_type:
+                    self.handle_media_video(m)
+                else:
+                    self.logger.warning(
+                        f"Media '{m.title}' type {m.media_type} is unsupported")
+                    import pdb
+                    pdb.set_trace()
+        except (Unauthorized, ResourceDoesNotExist) as e:
+            self.logger.warning(e)
+            self.logger.warning(f"Media objects not accesible")
+        self.pop()
+
+    def recurse_folder(self, folder):
+        self.push(folder, "folder", name_key="full_name")
+        files = folder.get_files()
+        try:
+            for f in files:
+                try:
+                    f_name = f.title
+                except AttributeError:
+                    try:
+                        f_name = f.display_name
+                    except Exception as e:
+                        import pdb
+                        pdb.set_trace()
+
+                f_path = os.path.join(self.path, f_name)
+
+                if self._should_write(f_path):
+                    self.logger.info(f"Downloading {f_path}")
+                    f.download(f_path)
+                    self.logger.info(f"{f_path} downloaded")
+        except Unauthorized:
+            self.logger.warning(f"folder not accesible")
         self.pop()
 
     def recurse_module(self, module):
         self.push(module, "module")
-        items = self.get_all_objects(module["items_url"])
+        items = module.get_module_items()
         for i in items:
             self.recurse_item(i)
         self.pop()
 
     def recurse_item(self, item):
         self.push(item, "item", name_key="title")
-        if item["type"] == "File":
+        if item.type == "File":
             self.handle_file(item)
-        elif item["type"] == "Page":
+        elif item.type == "Page":
             self.handle_page(item)
-        elif item["type"] == "Assignment":
+        elif item.type == "Assignment":
             self.handle_assignment(item)
+        elif item.type == "Quiz":
+            self.handle_quiz(item)
         else:
-            self.logger.warning(f"Unsupported type {item['type']}")
+            self.logger.warning(f"Unsupported type {item.type}")
+            import pdb
+            pdb.set_trace()
         self.pop()
 
     def handle_file(self, item):
-        file_info_url = item["url"]
-        r = self._get(file_info_url)
-        file_info = r.json()
-
-        file_name = urllib.parse.unquote(file_info["filename"])
-        file_url = file_info["url"]
+        file_name = item.title
+        file_url = item.url
         file_path = os.path.join(self.path, file_name)
         self._dl(file_url, file_path)
 
+    def handle_media_video(self, item):
+        media_name = item.title
+        media_path = os.path.join(self.path, media_name)
+        sources = item.media_sources
+        sources.sort(key=lambda s: int(s['size']), reverse=True)
+        media_url = sources[0]['url']
+        self._dl(media_url, media_path)
+
     def handle_page(self, item):
-        page_url = item["url"]
+        page = self._canvas.get_course(
+            item.course_id).get_page(item.page_url).body
 
         page_path = os.path.join(self.path, "page.html")
         page_md_path = os.path.join(self.path, "page.md")
 
-        if self.markdown and self._dl_page(page_url, page_path):
+        if self.markdown and self._dl_page(page, page_path):
             self._markdownify(page_path, page_md_path)
             self._dl_page_data(page_path)
 
     def handle_assignment(self, item):
-        pass
+        page_path = os.path.join(self.path, "assignment.html")
+        page_md_path = os.path.join(self.path, "assignment.md")
+        json_path = os.path.join(self.path, "assignment.json")
+        assignment = self._canvas.get_course(
+            item.course_id).get_assignment(item.content_id)
+
+        self._dl_obj(assignment, json_path)
+
+        page = assignment.description
+        if page:
+            if self.markdown and self._dl_page(page, page_path):
+                self._markdownify(page_path, page_md_path)
+                self._dl_page_data(page_path)
+
+        submission = assignment.get_submission(self.user)
+        self.handle_submission(submission)
+
+    def handle_quiz(self, item):
+        page_path = os.path.join(self.path, "quiz.html")
+        page_md_path = os.path.join(self.path, "quiz.md")
+        json_path = os.path.join(self.path, "quiz.json")
+        quiz = self._canvas.get_course(
+            item.course_id).get_quiz(item.content_id)
+        page = quiz.description
+        if page:
+            if self.markdown and self._dl_page(page, page_path):
+                self._markdownify(page_path, page_md_path)
+                self._dl_page_data(page_path)
+        self._dl_obj(quiz, json_path)
+
+    def handle_submission(self, submission):
+        self.push(submission, "submission", name_key="id")
+        json_path = os.path.join(self.path, f"submission_{submission.id}.json")
+
+        try:
+            attachments = submission.attachments
+            for a in attachments:
+                f_path = os.path.join(self.path, a["filename"])
+                url = a["url"]
+                self._dl(url, f_path)
+        except AttributeError:
+            self.logger.warning("No attachments found")
+
+        self._dl_obj(submission, json_path)
+        self.pop()
 
     def push(self, obj, type, name_key="name"):
-        name = obj[name_key]
-        id = obj["id"]
+        id = obj.id
+        try:
+            name = str(getattr(obj, name_key))
+        except:
+            name = str(id)
 
+        self.push_raw(name, type, id)
+
+    def push_raw(self, name, type, id):
         self._push_logger(f"{type}_{id}")
         self._push_name(name)
         self._push_id(id)
-
         self.logger.info(name)
 
     def pop(self):
@@ -139,8 +309,6 @@ class CanvasScraper:
     def _create_base_url(base_url):
         if "https" not in base_url:
             base_url = f"https://{base_url}"
-        if "api/v1" not in base_url:
-            base_url = os.path.join(base_url, "api/v1")
         return base_url
 
     def _courses_url(self):
@@ -173,22 +341,37 @@ class CanvasScraper:
 
     def _dl(self, url, path):
         if self._should_write(path):
-            r = self._get(url)
-            with open(path, "wb") as f:
-                f.write(r.content)
+            try:
+                self.logger.info(f"Downloading {path}")
+                r = self._get(url)
+                with open(path, "wb") as f:
+                    f.write(r.content)
+                    self.logger.info(f"{path} downloaded")
+                    return True
+            except MissingSchema as e:
+                self.logger.error(f"{url} is not a valid url")
+                return False
+            except Exception as e:
+                self.logger.error("file download failed")
+                import pdb
+                pdb.set_trace()
+                self.logger.error(e)
+
+    def _dl_page(self, page, path):
+        if self._should_write(path):
+            with open(path, "w") as f:
+                f.writelines(page)
                 self.logger.info(f"{path} downloaded")
                 return True
 
-    def _dl_page(self, url, path, key="body"):
-        r = self._get(url)
-        page = r.json()
-        if "body" in page.keys() and self._should_write(path):
+    def _dl_obj(self, obj, path):
+        if self._should_write(path):
             with open(path, "w") as f:
-                f.writelines(page["body"])
+                json.dump(obj.__dict__, f, indent=2, default=str)
                 self.logger.info(f"{path} downloaded")
-                return True
 
     def _dl_page_data(self, src_path):
+        self.logger.info(f"Downloading page data for {src_path}")
         with open(src_path, "r") as f:
             src = f.read()
 
