@@ -11,6 +11,7 @@ from canvasapi import Canvas
 from canvasapi.exceptions import Unauthorized, ResourceDoesNotExist
 
 from canvasapi.canvas_object import CanvasObject
+from canvasapi.file import File
 from canvasapi.paginated_list import PaginatedList
 from canvasapi.util import combine_kwargs
 
@@ -28,6 +29,7 @@ def get_media_objects(self, *args, **kwargs):
         {"course_id": self.id},
         _kwargs=combine_kwargs(**kwargs),
     )
+
 
 
 class CanvasScraper:
@@ -62,6 +64,19 @@ class CanvasScraper:
             self.push(course, "course")
         except KeyError:
             return
+
+        try:
+            external_tools = course.get_external_tools()
+            external_tools = list(external_tools)
+            self.logger.info(str(course.name))
+            self.logger.info(external_tools)
+            if external_tools:
+                import pdb
+                pdb.set_trace()
+        except (Unauthorized, ResourceDoesNotExist) as e:
+            self.logger.warning(e)
+            self.logger.warning(f"External tools not accesible")
+
 
         try:
             fp_path = os.path.join(self.path, "front_page.html")
@@ -178,11 +193,28 @@ class CanvasScraper:
             self.handle_assignment(item)
         elif item.type == "Quiz":
             self.handle_quiz(item)
+        elif item.type == "SubHeader":
+            # TODO: Assuming you can't nest subheaders, it's probably enough
+            # to just pop the stack if the top contains a subheader, and then 
+            # push a new folder for each subheader.
+            self.logger.warning(
+                "SubHeader's are not supported for now, skipping")
+            #self.handle_subheader(item)
+        elif item.type == "ExternalUrl":
+            self.handle_external_url(item)
         else:
             self.logger.warning(f"Unsupported type {item.type}")
             import pdb
             pdb.set_trace()
         self.pop()
+
+    def handle_external_url(self, item):
+        file_path = os.path.join(self.path, f"{item.title}.txt")
+        url = item.external_url
+        if self._should_write(file_path):
+            with open(file_path, "w") as f:
+                f.write(url)
+                self.logger.info(f"{file_path} downloaded")
 
     def handle_file(self, item):
         file_name = item.title
@@ -207,7 +239,7 @@ class CanvasScraper:
 
         if self.markdown and self._dl_page(page, page_path):
             self._markdownify(page_path, page_md_path)
-            self._dl_page_data(page_path)
+            self._dl_page_data(page_path, item._requester)
 
     def handle_assignment(self, item):
         page_path = os.path.join(self.path, "assignment.html")
@@ -222,7 +254,7 @@ class CanvasScraper:
         if page:
             if self.markdown and self._dl_page(page, page_path):
                 self._markdownify(page_path, page_md_path)
-                self._dl_page_data(page_path)
+                self._dl_page_data(page_path, item._requester)
 
         submission = assignment.get_submission(self.user)
         self.handle_submission(submission)
@@ -237,7 +269,7 @@ class CanvasScraper:
         if page:
             if self.markdown and self._dl_page(page, page_path):
                 self._markdownify(page_path, page_md_path)
-                self._dl_page_data(page_path)
+                self._dl_page_data(page_path, item._requester)
         self._dl_obj(quiz, json_path)
 
     def handle_submission(self, submission):
@@ -370,16 +402,40 @@ class CanvasScraper:
                 json.dump(obj.__dict__, f, indent=2, default=str)
                 self.logger.info(f"{path} downloaded")
 
-    def _dl_page_data(self, src_path):
+    def _dl_page_data(self, src_path, requester):
         self.logger.info(f"Downloading page data for {src_path}")
         with open(src_path, "r") as f:
             src = f.read()
 
         soup = BeautifulSoup(src, "html.parser")
-        links = soup.find_all('a', **{'data-api-returntype': 'File'})
+        links = soup.find_all('a')
+
+        if links:
+            self._mkd(os.path.join(self.path, "files"))
         for link in links:
-            dl_path = os.path.join(self.path, "files", link["title"])
-            self._dl(link["href"], dl_path)
+            href = link.get("href")
+            title = link.get("title")
+            if not title:
+                title = link.text
+            if not href:
+                self.logger.warning(f"Link not found for title {title}")
+                continue
+            self.logger.info(f"Downloading link for: {title}")
+            self.logger.info(href)
+            if link.get("class") and "instructure_file_link" in link["class"]:
+                # This is necessary because files don't always show up
+                # under the files section of a course for some reason
+                self.logger.info(
+                    "Canvas file detected, using Canvas API for download")
+                self._dl_canvas_file(
+                    href, os.path.join(self.path, "files"), requester)
+            else:
+                self.logger.warning(
+                    "Non Canvas file link, attempting generic download")
+                import pdb
+                pdb.set_trace()
+                dl_path = os.path.join(self.path, "files", title)
+                self._dl(link["href"], dl_path)
 
         if self.videos:
             # Download Kaltura videos
@@ -387,6 +443,17 @@ class CanvasScraper:
             for idx, video in enumerate(videos):
                 video_path = os.path.join(self.path, "videos", f"{idx}.mp4")
                 self._dl_video(video["src"], video_path)
+
+    def _dl_canvas_file(self, url, path, requester):
+        canvas_path = urllib.parse.urlparse(url).path
+        resp = requester.request("GET", canvas_path)
+        file = File(requester, resp.json())
+        dl_path = os.path.join(path, file.filename)
+        if not self._should_write(dl_path):
+            return
+        file.download(dl_path)
+        self.logger.info(f"{dl_path} downloaded")
+        return True
 
     def _dl_video(self, base_url, path):
         if not self._should_write(path):
