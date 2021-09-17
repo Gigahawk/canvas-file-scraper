@@ -1,9 +1,12 @@
+import types
+import re
 import os
 import requests
 from requests.exceptions import MissingSchema
 import logging
 import json
 from tempfile import TemporaryFile
+from pathvalidate import sanitize_filename
 import urllib
 from bs4 import BeautifulSoup
 from markdownify import markdownify as md
@@ -46,6 +49,7 @@ class CanvasScraper:
         self._logger = logger
         self._canvas = Canvas(self.base_url, self.api_key)
         self.user = self._canvas.get_current_user()
+        self.visited_page_links = []
 
         if not self._logger:
             self._logger = logging
@@ -57,156 +61,216 @@ class CanvasScraper:
     def scrape(self):
         courses = self.user.get_courses()
         for c in courses:
+            try:
+                print(c)
+            except AttributeError:
+                print("Null course")
+            #import pdb
+            #pdb.set_trace()
             self.recurse_course(c)
 
     def recurse_course(self, course):
         try:
-            self.push(course, "course")
-        except KeyError:
-            return
+            try:
+                self.push(course, "course")
+            except KeyError:
+                return
 
-        try:
-            external_tools = course.get_external_tools()
-            external_tools = list(external_tools)
-            self.logger.info(str(course.name))
-            self.logger.info(external_tools)
-            if external_tools:
-                import pdb
-                pdb.set_trace()
-        except (Unauthorized, ResourceDoesNotExist) as e:
-            self.logger.warning(e)
-            self.logger.warning(f"External tools not accesible")
+            try:
+                external_tools = course.get_external_tools()
+                external_tools = list(external_tools)
+                self.logger.info(str(course.name))
+                self.logger.info(external_tools)
+                if external_tools:
+                    import pdb
+                    pdb.set_trace()
+            except (Unauthorized, ResourceDoesNotExist) as e:
+                self.logger.warning(e)
+                self.logger.warning(f"External tools not accesible")
+
+            self.push_raw(f"assignments_{course.id}", "assignments", 0)
+            try:
+                assignments = course.get_assignments()
+                for a in assignments:
+                    self.push_raw(f"assignment_{a.name}", "assignment", 0)
+                    try:
+                        self.handle_assignment(a)
+                    finally:
+                        self.pop()
+            except (Unauthorized, ResourceDoesNotExist) as e:
+                self.logger.warning(e)
+                self.logger.warning(f"Assignments not accesible")
+            finally:
+                self.pop()
+
+            self.push_raw(f"pages_{course.id}", "pages", 0)
+            try:
+                pages = course.get_pages()
+                for p in pages:
+                    self.push_raw(f"page_{p.title}", "page", 0)
+                    try:
+                        self.handle_page(p)
+                    finally:
+                        self.pop()
+            except (Unauthorized, ResourceDoesNotExist) as e:
+                self.logger.warning(e)
+                self.logger.warning(f"Pages not accesible")
+            finally:
+                self.pop()
+
+            try:
+                fp_path = os.path.join(self.path, "front_page.html")
+                fp_md_path = os.path.join(self.path, "front_page.md")
+                fp = course.show_front_page().body
+
+                if self._dl_page(fp, fp_path) and self.markdown:
+                    self._dl_page_data(fp_path, course._requester)
+                    self._markdownify(fp_path, fp_md_path)
+            except (Unauthorized, ResourceDoesNotExist) as e:
+                self.logger.warning(e)
+                self.logger.warning(f"Front page not accesible")
+
+            try:
+                modules = course.get_modules()
+                for m in modules:
+                    self.recurse_module(m)
+            except (Unauthorized, ResourceDoesNotExist) as e:
+                self.logger.warning(e)
+                self.logger.warning(f"Modules not accesible")
+
+            try:
+                groups = course.get_groups()
+                for g in groups:
+                    self.recurse_group(g)
+            except (Unauthorized, ResourceDoesNotExist) as e:
+                self.logger.warning(e)
+                self.logger.warning(f"Groups not accesible")
 
 
-        try:
-            fp_path = os.path.join(self.path, "front_page.html")
-            fp_md_path = os.path.join(self.path, "front_page.md")
-            fp = course.show_front_page().body
+            self.scrape_files(course)
 
-            if self.markdown and self._dl_page(fp, fp_path):
-                self._markdownify(fp_path, fp_md_path)
-        except (Unauthorized, ResourceDoesNotExist) as e:
-            self.logger.warning(e)
-            self.logger.warning(f"Front page not accesible")
-
-        try:
-            modules = course.get_modules()
-            for m in modules:
-                self.recurse_module(m)
-        except (Unauthorized, ResourceDoesNotExist) as e:
-            self.logger.warning(e)
-            self.logger.warning(f"Modules not accesible")
-
-        try:
-            groups = course.get_groups()
-            for g in groups:
-                self.recurse_group(g)
-        except (Unauthorized, ResourceDoesNotExist) as e:
-            self.logger.warning(e)
-            self.logger.warning(f"Groups not accesible")
-        self.scrape_files(course)
-
-        self.scrape_media(course)
-
-
-        self.pop()
+            self.scrape_media(course)
+        finally:
+            self.pop()
 
     def recurse_group(self, group):
         try:
-            self.push(group, "group")
-        except KeyError:
-            return
-        json_path = os.path.join(self.path, "group.json")
-        self._dl_obj(group, json_path)
-        self.scrape_files(group)
-        self.pop()
+            try:
+                self.push(group, "group")
+            except KeyError:
+                return
+            json_path = os.path.join(self.path, "group.json")
+            self._dl_obj(group, json_path)
+            self.scrape_files(group)
+        finally:
+            self.pop()
 
     def scrape_files(self, obj):
-        # Hack to put files under a separate subfolder from modules
-        self.push_raw(f"files_{obj.id}", "files", 0)
         try:
-            # get_folders() returns a flat list of all folders
-            folders = obj.get_folders()
-            for f in folders:
-                self.recurse_folder(f)
-        except Unauthorized:
-            self.logger.warning(f"Files not accesible")
-        self.pop()
+            # Hack to put files under a separate subfolder from modules
+            self.push_raw(f"files_{obj.id}", "files", 0)
+            try:
+                # get_folders() returns a flat list of all folders
+                folders = obj.get_folders()
+                for f in folders:
+                    self.recurse_folder(f)
+            except Unauthorized:
+                self.logger.warning(f"Files not accesible")
+        finally:
+            self.pop()
 
     def scrape_media(self, obj):
-        # Hack to put media under a separate subfolder from modules
-        self.push_raw(f"media_{obj.id}", "media", 0)
         try:
-            obj.__class__.get_media_objects = get_media_objects
-            media_objs = obj.get_media_objects()
-            for m in media_objs:
-                if "video" in m.media_type:
-                    self.handle_media_video(m)
-                else:
-                    self.logger.warning(
-                        f"Media '{m.title}' type {m.media_type} is unsupported")
-                    import pdb
-                    pdb.set_trace()
-        except (Unauthorized, ResourceDoesNotExist) as e:
-            self.logger.warning(e)
-            self.logger.warning(f"Media objects not accesible")
-        self.pop()
+            # Hack to put media under a separate subfolder from modules
+            self.push_raw(f"media_{obj.id}", "media", 0)
+            try:
+                obj.__class__.get_media_objects = get_media_objects
+                media_objs = obj.get_media_objects()
+                for m in media_objs:
+                    if "video" in m.media_type:
+                        self.handle_media_video(m)
+                    else:
+                        self.logger.warning(
+                            f"Media '{m.title}' type {m.media_type} is unsupported")
+                        import pdb
+                        pdb.set_trace()
+            except (Unauthorized, ResourceDoesNotExist) as e:
+                self.logger.warning(e)
+                self.logger.warning(f"Media objects not accesible")
+        finally:
+            self.pop()
 
     def recurse_folder(self, folder):
         self.push(folder, "folder", name_key="full_name")
-        files = folder.get_files()
         try:
-            for f in files:
-                try:
-                    f_name = f.title
-                except AttributeError:
+            files = folder.get_files()
+            try:
+                for f in files:
                     try:
-                        f_name = f.display_name
-                    except Exception as e:
-                        import pdb
-                        pdb.set_trace()
+                        f_name = f.title
+                    except AttributeError:
+                        try:
+                            f_name = f.display_name
+                        except Exception as e:
+                            import pdb
+                            pdb.set_trace()
 
-                f_path = os.path.join(self.path, f_name)
+                    f_path = os.path.join(self.path, f_name)
 
-                if self._should_write(f_path):
-                    self.logger.info(f"Downloading {f_path}")
-                    f.download(f_path)
-                    self.logger.info(f"{f_path} downloaded")
-        except Unauthorized:
-            self.logger.warning(f"folder not accesible")
-        self.pop()
+                    if self._should_write(f_path):
+                        self.logger.info(f"Downloading {f_path}")
+                        try:
+                            f.download(f_path)
+                            self.logger.info(f"{f_path} downloaded")
+                        except (Unauthorized, ResourceDoesNotExist) as e:
+                            self.logger.warning(f"file not accesible")
+                            self.logger.warning(str(e))
+            except (Unauthorized, ResourceDoesNotExist) as e:
+                self.logger.warning(f"folder not accesible")
+                self.logger.warning(str(e))
+        finally:
+            self.pop()
 
     def recurse_module(self, module):
         self.push(module, "module")
-        items = module.get_module_items()
-        for i in items:
-            self.recurse_item(i)
-        self.pop()
+        try:
+            items = module.get_module_items()
+            for i in items:
+                self.recurse_item(i)
+        finally:
+            self.pop()
 
     def recurse_item(self, item):
         self.push(item, "item", name_key="title")
-        if item.type == "File":
-            self.handle_file(item)
-        elif item.type == "Page":
-            self.handle_page(item)
-        elif item.type == "Assignment":
-            self.handle_assignment(item)
-        elif item.type == "Quiz":
-            self.handle_quiz(item)
-        elif item.type == "SubHeader":
-            # TODO: Assuming you can't nest subheaders, it's probably enough
-            # to just pop the stack if the top contains a subheader, and then 
-            # push a new folder for each subheader.
-            self.logger.warning(
-                "SubHeader's are not supported for now, skipping")
-            #self.handle_subheader(item)
-        elif item.type == "ExternalUrl":
-            self.handle_external_url(item)
-        else:
-            self.logger.warning(f"Unsupported type {item.type}")
-            import pdb
-            pdb.set_trace()
-        self.pop()
+        try:
+            if item.type == "File":
+                self.logger.info("Handling file")
+                self.handle_file(item)
+            elif item.type == "Page":
+                self.logger.info("Handling page")
+                self.handle_page(item)
+            elif item.type == "Assignment":
+                self.logger.info("Handling assignment")
+                self.handle_assignment(item)
+            elif item.type == "Quiz":
+                self.logger.info("Handling quiz")
+                self.handle_quiz(item)
+            elif item.type == "SubHeader":
+                # TODO: Assuming you can't nest subheaders, it's probably enough
+                # to just pop the stack if the top contains a subheader, and then 
+                # push a new folder for each subheader.
+                self.logger.warning(
+                    "SubHeader's are not supported for now, skipping")
+                #self.handle_subheader(item)
+            elif item.type == "ExternalUrl":
+                self.logger.info("Handling external URL")
+                self.handle_external_url(item)
+            else:
+                self.logger.warning(f"Unsupported type {item.type}")
+                import pdb
+                pdb.set_trace()
+        finally:
+            self.pop()
 
     def handle_external_url(self, item):
         file_path = os.path.join(self.path, f"{item.title}.txt")
@@ -220,7 +284,10 @@ class CanvasScraper:
         file_name = item.title
         file_url = item.url
         file_path = os.path.join(self.path, file_name)
-        self._dl(file_url, file_path)
+        requester = item._requester
+        self.logger.info(f"Downloading {file_name}")
+        self._dl_canvas_file(
+            file_url, file_path, requester)
 
     def handle_media_video(self, item):
         media_name = item.title
@@ -231,22 +298,45 @@ class CanvasScraper:
         self._dl(media_url, media_path)
 
     def handle_page(self, item):
+        if getattr(item, "page_url", None):
+            url = item.page_url
+        elif getattr(item, "url", None):
+            url = item.url
+        else:
+            self.logger.error("Could not get url for page item")
+            import pdb;pdb.set_trace()
         page = self._canvas.get_course(
-            item.course_id).get_page(item.page_url).body
+            item.course_id).get_page(url)
+        try:
+            page_body = page.body
+        except AttributeError:
+            if page.locked_for_user:
+                self.logger.info("Page locked, reason:")
+                self.logger.info(page.lock_explanation)
+            self.logger.error("Page not accessible")
+            return
 
         page_path = os.path.join(self.path, "page.html")
         page_md_path = os.path.join(self.path, "page.md")
 
-        if self.markdown and self._dl_page(page, page_path):
+        if self.markdown and self._dl_page(page_body, page_path):
             self._markdownify(page_path, page_md_path)
             self._dl_page_data(page_path, item._requester)
 
     def handle_assignment(self, item):
+        if getattr(item, "content_id", None):
+            asn_id = item.content_id
+        elif getattr(item, "id", None):
+            asn_id = item.id
+        else:
+            self.logger.error("Could not get url for assignment item")
+            import pdb;pdb.set_trace()
+
         page_path = os.path.join(self.path, "assignment.html")
         page_md_path = os.path.join(self.path, "assignment.md")
         json_path = os.path.join(self.path, "assignment.json")
         assignment = self._canvas.get_course(
-            item.course_id).get_assignment(item.content_id)
+            item.course_id).get_assignment(asn_id)
 
         self._dl_obj(assignment, json_path)
 
@@ -274,19 +364,21 @@ class CanvasScraper:
 
     def handle_submission(self, submission):
         self.push(submission, "submission", name_key="id")
-        json_path = os.path.join(self.path, f"submission_{submission.id}.json")
-
         try:
-            attachments = submission.attachments
-            for a in attachments:
-                f_path = os.path.join(self.path, a["filename"])
-                url = a["url"]
-                self._dl(url, f_path)
-        except AttributeError:
-            self.logger.warning("No attachments found")
+            json_path = os.path.join(self.path, f"submission_{submission.id}.json")
 
-        self._dl_obj(submission, json_path)
-        self.pop()
+            try:
+                attachments = submission.attachments
+                for a in attachments:
+                    f_path = os.path.join(self.path, a["filename"])
+                    url = a["url"]
+                    self._dl(url, f_path)
+            except AttributeError:
+                self.logger.warning("No attachments found")
+
+            self._dl_obj(submission, json_path)
+        finally:
+            self.pop()
 
     def push(self, obj, type, name_key="name"):
         id = obj.id
@@ -327,7 +419,8 @@ class CanvasScraper:
 
     @property
     def path(self):
-        return os.path.join(self._path, *self._names)
+        return os.path.join(
+            self._path, *[sanitize_filename(n) for n in self._names])
 
     @property
     def name(self):
@@ -422,18 +515,48 @@ class CanvasScraper:
                 continue
             self.logger.info(f"Downloading link for: {title}")
             self.logger.info(href)
-            if link.get("class") and "instructure_file_link" in link["class"]:
+            if href in self.visited_page_links:
+                self.logger.warning("Page has been visited before, skipping")
+                continue
+            self.visited_page_links.append(href)
+            if link.get("class") and "instructure_file_link" in link["class"] and "canvas" in href:
                 # This is necessary because files don't always show up
                 # under the files section of a course for some reason
                 self.logger.info(
                     "Canvas file detected, using Canvas API for download")
-                self._dl_canvas_file(
-                    href, os.path.join(self.path, "files"), requester)
+                try:
+                    self._dl_canvas_file(
+                        href, os.path.join(self.path, "files"), requester)
+                except (Unauthorized, ResourceDoesNotExist) as e:
+                    self.logger.error("Could not download file")
+            elif href.startswith("mailto"):
+                self.logger.info("mailto link detected, saving email")
+                mail_path = os.path.join(self.path, "files", title)
+                with open(mail_path, "w") as f:
+                    f.write(href)
+            elif self._is_page_url(href):
+                self.logger.info("Canvas page detected, handling page")
+                page_item = self._page_url_to_item(href, requester)
+                self.push_raw(f"page_{page_item.page_url}", "page", 0)
+                try:
+                    self.handle_page(page_item)
+                except:
+                    self.logger.info("Could not handle page item")
+                finally:
+                    self.pop()
+            elif self._is_assignment_url(href):
+                self.logger.info("Canvas assignment detected, handling assignment")
+                assignment_item  = self._assignment_url_to_item(href, requester)
+                self.push_raw(f"assignment_{assignment_item.content_id}", "assignment", 0)
+                try:
+                    self.handle_assignment(assignment_item)
+                except:
+                    self.logger.info("Could not handle assignment item")
+                finally:
+                    self.pop()
             else:
                 self.logger.warning(
                     "Non Canvas file link, attempting generic download")
-                import pdb
-                pdb.set_trace()
                 dl_path = os.path.join(self.path, "files", title)
                 self._dl(link["href"], dl_path)
 
@@ -446,6 +569,7 @@ class CanvasScraper:
 
     def _dl_canvas_file(self, url, path, requester):
         canvas_path = urllib.parse.urlparse(url).path
+        canvas_path = canvas_path.replace("/api/v1", "")
         resp = requester.request("GET", canvas_path)
         file = File(requester, resp.json())
         dl_path = os.path.join(path, file.filename)
@@ -511,6 +635,34 @@ class CanvasScraper:
                 tf.seek(0)
                 f.write(tf.read())
             self.logger.info(f"Downloaded {path} successfully")
+
+    def _is_page_url(self, url):
+        page_regex = re.compile(r".+courses/\d+/pages/.+")
+        matches = page_regex.match(url)
+        return bool(matches)
+
+    def _is_assignment_url(self, url):
+        page_regex = re.compile(r".+courses/\d+/assignments/.+")
+        matches = page_regex.match(url)
+        return bool(matches)
+
+    def _page_url_to_item(self, url, requester):
+        return self._url_to_item(url, requester, "page_url")
+
+    def _assignment_url_to_item(self, url, requester):
+        return self._url_to_item(url, requester, "content_id")
+
+    def _url_to_item(self, url, requester, attrname):
+        segments = url.split("/")
+        course_idx = segments.index("courses")
+        course_id = segments[course_idx + 1]
+        name = segments[-1]
+        item = types.SimpleNamespace()
+        item.course_id = course_id
+        item._requester = requester
+        setattr(item, attrname, name)
+        return item
+
 
     def _markdownify(self, src_path, dest_path):
         if self._should_write(dest_path):

@@ -12,6 +12,7 @@ requests = "*"
 markdownify = "*"
 "bs4" = "*"
 canvasapi = "*"
+pathvalidate = "*"
 
 [requires]
 python_version = "3.8"
